@@ -1,6 +1,155 @@
-import pywhatkit as kit
+import sys
+import getopt
+import httplib
+import urllib
+import xml.dom.minidom
+from xml.dom.minidom import parseString
+####################
+# Funciones
+####################
+def usage():
+    print 'Uso del programa:'
+    print '\tArgumentos Obligatorios:'
+    print '\t\t -i\t--id\t\tCodigo de Cliente de la cuenta en Descom SMS'
+    print '\t\t -u\t--username\tNombre de usuario de la cuenta en Descom SMS'
+    print '\t\t -p\t--passwd\tPassword del usuario de la cuenta en Descom SMS'
+    print '\tArgumentos Opcionales:'
+    print '\t\t -s\t--sendsms\tLista de nuemeros de moviles a los que se le envia el mensaje, separado por ",". Si no se define este argumento, se obtiene el saldo de la cuenta.'
+    print '\t\t -m\t--message\tTexto del mensaje a enviar.'
+    print '\t\t -r\t--remitente\tRemitente personalizado del mensaje.'
+def StrtoHex(s):
+    lst = []
+    for ch in s:
+        hv = hex(ord(ch)).replace('0x', '')
+        if len(hv) == 1:
+            hv = '0'+hv
+        lst.append(hv)
+    return reduce(lambda x,y:x+y, lst)
 
-kit.sendwhatmsg(
-'+51943480619',
-'Probando bot!', 16, 40,
-)
+#######################
+# Variables globales
+#######################
+HOSTNAME = 'www.descomsms.com'
+URL='/AP/descomMessage.servlet.Servlet'
+VERBOSE=False
+USERNAME=''
+PASSWD=''
+ID=''
+REMITENTE=''
+MOVILES=''
+MENSAJE=''
+MENSAJESXML=''
+ 
+#######################
+# Entrada de datos
+#######################
+try:
+    opts, args = getopt.getopt(sys.argv[1:], "hu:p:i:vs:m:r:", ["help", "username=", "passwd=", "id=","verbose","sendsms=","message=","remitente="])
+except getopt.GetoptError, err:
+        print str(err)
+        usage()
+        sys.exit(2)
+for o, a in opts:
+    if o == "-v":
+        VERBOSE = True
+    elif o in ("-h", "--help"):
+        usage()
+        sys.exit()
+    elif o in ("-u", "--username"):
+         USERNAME = a
+    elif o in ("-p", "--passwd"):
+        PASSWD = a
+    elif o in ("-i", "--id"):
+        ID = a
+    elif o in ("-s","--sendsms"):
+        MOVILES = a
+    elif o in ("-m","--message"):    
+        MENSAJE = a
+    elif o in ("-r","--remitente"):
+        REMITENTE = a
+    else:
+        assert False, "unhandled option"
+if USERNAME=='' or PASSWD=='' or ID=='':
+    usage()
+    sys.exit()
+if MOVILES<>'' and MENSAJE=='':
+    usage()
+    sys.exit()
+ 
+############################
+# Crear Trama XML de envio
+############################
+N=0
+if MOVILES<>'':
+    for M in MOVILES.split(','):
+        N=N+1
+        MENSAJESXML+='<Mensaje><Id>'+str(N)+'</Id><Destino>'+M.strip()+'</Destino><Texto>'+StrtoHex(MENSAJE)+'</Texto></Mensaje>'
+    if REMITENTE<>'':
+        REMITENTE=StrtoHex(REMITENTE)
+        REMITENTE='<Remitente>'+REMITENTE+'</Remitente>'
+
+XML='<TXEnvio><Autentificacion><Usuario>'+StrtoHex(USERNAME)+'</Usuario><Passwd>'+StrtoHex(PASSWD)+'</Passwd><Idcli>'+ID+'</Idcli>'+REMITENTE+'</Autentificacion>'
+if MENSAJESXML<>'':
+    XML+='<Mensajes><Total>'+str(N)+'</Total>'+MENSAJESXML+'</Mensajes>'
+XML+='</TXEnvio>'
+##################
+# Envio de SMS's
+##################
+params = urllib.urlencode({'xml': XML})
+headers = {"Content-type": "application/x-www-form-urlencoded"}
+conn = httplib.HTTPSConnection(HOSTNAME)
+conn.request('POST', URL, params, headers)
+response = conn.getresponse()
+if response.status<>200:
+    print 'Error: ',response.reason
+    sys.exit(2)
+RXML=response.read()
+conn.close()
+dom=parseString(RXML) 
+nodos=dom.childNodes
+ 
+#######################
+# Analisis de respuesta
+#######################
+for n in dom.getElementsByTagName("Autentificacion"):
+    Auth=n
+    break
+for n in Auth.getElementsByTagName("Resultado"):
+    RAuth=n.firstChild.data
+for n in Auth.getElementsByTagName("Comentario"):
+    Comentario=n.firstChild.data
+for n in Auth.getElementsByTagName("Saldo"):
+    SALDO=n.firstChild.data
+if RAuth<>"1":    
+    print "Error: ", Comentario
+    sys.exit(2)
+if MOVILES=='':
+    print "Saldo actual: ",SALDO,"creditos"
+    sys.exit(0)
+else:
+    for n in dom.getElementsByTagName("Mensajes"):
+        MSGS=n
+        break
+    TOTAL_ERRORES=int(MSGS.attributes["total_error"].value)
+    TOTAL_MENSAJES=int(MSGS.attributes["total_mensajes"].value)
+    TOTAL_OK=int(MSGS.attributes["total_ok"].value)
+    if TOTAL_ERRORES==0:
+        print 'Ok, '+str(TOTAL_OK)+' mensajes enviados'
+    else:
+        if TOTAL_OK==0:
+            print 'Error, ningun mensajes ha sido enviado.'
+        else:
+            print 'Error, '+str(TOTAL_ERRORES)+' mensajes enviados con errores, '+str(TOTAL_OK)+' enviados correctamente:'
+        MMOVILES=MOVILES.split(',')
+        NN=0
+        for M in MSGS.getElementsByTagName("Mensaje"):
+            for n in M.getElementsByTagName("Resultado"):
+                RMesg=n.firstChild.data
+                break
+            for n in M.getElementsByTagName("Comentario"):
+                                CMesg=n.firstChild.data
+                                break
+            if RMesg=="0":
+                print '\t['+MMOVILES[NN]+'] ERR ['+CMesg+']'
+            NN=NN+1
+    print "Saldo actual: ",SALDO,"creditos"
